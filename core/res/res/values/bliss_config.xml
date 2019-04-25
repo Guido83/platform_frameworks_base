@@ -125,7 +125,7 @@
             64 - Volume rocker
          For example, a device with Home, Back and Menu keys would set this
          config to 7. -->
-<integer name="config_deviceHardwareWakeKeys">103</integer>
+    <integer name="config_deviceHardwareWakeKeys">103</integer>
 
     <!-- EdgeGesture service -->
     <java-symbol type="dimen" name="edge_gesture_trigger_distance" />
