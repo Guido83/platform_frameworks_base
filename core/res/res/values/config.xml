@@ -1571,6 +1571,7 @@
     <!-- 5 minutes -->
     <integer name="config_timeZoneRulesCheckTimeMillisAllowed">300000</integer>
 
+    <!-- 
     <!-- Hardware keys present on the device, stored as a bit field.
          This integer should equal the sum of the corresponding value for each
          of the following keys present:
@@ -1598,6 +1599,7 @@
          For example, a device with Home, Back and Menu keys would set this
          config to 7. -->
     <integer name="config_deviceHardwareWakeKeys">103</integer>
+    -->
 
     <!-- The number of times a time zone update check is allowed to fail before the system will stop
          reacting to reliability triggers.
