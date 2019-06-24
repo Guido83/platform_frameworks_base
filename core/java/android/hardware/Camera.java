@@ -24,6 +24,7 @@ import android.annotation.SdkConstant.SdkConstantType;
 import android.app.ActivityThread;
 import android.app.AppOpsManager;
 import android.content.Context;
+import android.content.res.Resources;
 import android.graphics.ImageFormat;
 import android.graphics.Point;
 import android.graphics.Rect;
@@ -50,6 +51,7 @@ import android.text.TextUtils;
 import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
+import android.os.SystemProperties;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.app.IAppOpsCallback;
@@ -226,7 +228,7 @@ public class Camera {
     private android.hardware.Camera.AECallback mAECallback;
     private android.hardware.Camera.OneplusCallback mOneplusCallback;
     private android.hardware.Camera.ProcessCallback mProcessCallback;
-    private boolean mIsOPService = false;
+    private static boolean mIsOPService = false;
     private android.hardware.Camera.PictureCallback mOPServiceJpegCallback = null;
     private android.hardware.Camera.CameraStateCallback mCameraStateCallback;
 
@@ -272,7 +274,8 @@ public class Camera {
     }
     
     public static Camera openOPService() {
-        return new Camera(0, -0x64);
+        if (mIsOPService) return new Camera(0, -0x64);
+        return null;
     }
 
     /**
@@ -355,30 +358,18 @@ public class Camera {
      *   cameras or an error was encountered enumerating them.
      */
     public static int getNumberOfCameras() {
-        boolean exposeAuxCamera = true;
+        boolean exposeAuxCamera = false;
         String packageName = ActivityThread.currentOpPackageName();
         /* Force to expose only two cameras
          * if the package name does not falls in this bucket
          */
         String packageList = SystemProperties.get("vendor.camera.aux.packagelist");
-        String packageBlacklist = SystemProperties.get("vendor.camera.aux.packageblacklist");
         if (packageList.length() > 0) {
             TextUtils.StringSplitter splitter = new TextUtils.SimpleStringSplitter(',');
             splitter.setString(packageList);
-            exposeAuxCamera = false;
             for (String str : splitter) {
                 if (packageName.equals(str)) {
                     exposeAuxCamera = true;
-                    break;
-                }
-            }
-        } else if (packageBlacklist.length() > 0) {
-            TextUtils.StringSplitter splitter = new TextUtils.SimpleStringSplitter(',');
-            splitter.setString(packageBlacklist);
-            exposeAuxCamera = true;
-            for (String str : splitter) {
-                if (packageName.equals(str)) {
-                    exposeAuxCamera = false;
                     break;
                 }
             }
@@ -408,11 +399,7 @@ public class Camera {
         if(cameraId >= getNumberOfCameras()){
             throw new RuntimeException("Unknown camera ID");
         }
-        try {
-            _getCameraInfo(cameraId, cameraInfo);
-        } catch (RuntimeException e) {
-            Log.e(TAG, "Lock screen is disabled, facelock can't get camera info");
-        }
+        _getCameraInfo(cameraId, cameraInfo);
         IBinder b = ServiceManager.getService(Context.AUDIO_SERVICE);
         IAudioService audioService = IAudioService.Stub.asInterface(b);
         try {
@@ -648,6 +635,12 @@ public class Camera {
         mOneplusCallback = null;
         mProcessCallback = null;
 
+        boolean opCamHack = Resources.getSystem().getBoolean(
+                com.android.internal.R.bool.config_enableOPcamhack);
+        if (opCamHack) {
+            mIsOPService = true;
+        }
+
         Looper looper;
         if ((looper = Looper.myLooper()) != null) {
             mEventHandler = new EventHandler(this, looper);
@@ -660,7 +653,7 @@ public class Camera {
         String packageName = ActivityThread.currentOpPackageName();
 
         //Force HAL1 if the package name falls in this bucket
-        String packageList = SystemProperties.get("camera.hal1.packagelist", "");
+        String packageList = SystemProperties.get("vendor.camera.hal1.packagelist", "");
         if (packageList.length() > 0) {
             TextUtils.StringSplitter splitter = new TextUtils.SimpleStringSplitter(',');
             splitter.setString(packageList);
@@ -670,7 +663,7 @@ public class Camera {
                     break;
                 }
             }
-	}
+        }
         return native_setup(new WeakReference<Camera>(this), cameraId, halVersion, packageName);
     }
 
@@ -966,7 +959,10 @@ public class Camera {
      *
      * @throws RuntimeException if starting preview fails; usually this would be
      *    because of a hardware or other low-level error, or because release()
-     *    has been called on this Camera instance.
+     *    has been called on this Camera instance. The QCIF (176x144) exception
+     *    mentioned in {@link Parameters#setPreviewSize setPreviewSize} and
+     *    {@link Parameters#setPictureSize setPictureSize} can also cause this
+     *    exception be thrown.
      */
     public native final void startPreview();
 
@@ -1335,7 +1331,7 @@ public class Camera {
         public void handleMessage(Message msg) {
             int msgID = msg.what;
 
-            if (mOneplusCallback != null && msgID == CAMERA_MSG_RAW_IMAGE) {
+            if (mIsOPService && mOneplusCallback != null && msgID == CAMERA_MSG_RAW_IMAGE) {
                 msgID = CAMERA_MSG_DNG_IMAGE;
             }
 
@@ -1775,7 +1771,7 @@ public class Camera {
             msgType |= CAMERA_MSG_COMPRESSED_IMAGE;
         }
         //oneplus camera mod
-        if (mOneplusCallback != null) {
+        if (mIsOPService && mOneplusCallback != null) {
             msgType |= CAMERA_MSG_DNG_META_DATA;
             msgType |= CAMERA_MSG_DNG_IMAGE;
             mMetadata = new CameraMetadataNative();
@@ -2015,7 +2011,11 @@ public class Camera {
                     } catch (RemoteException e) {
                         Log.e(TAG, "Audio service is unavailable for queries");
                     }
-                    _enableShutterSound(false);
+                    try {
+                        _enableShutterSound(false);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Couldn't disable shutter sound");
+                    }
                 } else {
                     enableShutterSound(mShutterSoundEnabledFromApp);
                 }
@@ -3327,6 +3327,16 @@ public class Camera {
          * orientation should also be considered while setting picture size and
          * thumbnail size.
          *
+         * Exception on 176x144 (QCIF) resolution:
+         * Camera devices usually have a fixed capability for downscaling from
+         * larger resolution to smaller, and the QCIF resolution sometimes
+         * is not fully supported due to this limitation on devices with
+         * high-resolution image sensors. Therefore, trying to configure a QCIF
+         * preview size with any picture or video size larger than 1920x1080
+         * (either width or height) might not be supported, and
+         * {@link #setParameters(Camera.Parameters)} might throw a
+         * RuntimeException if it is not.
+         *
          * @param width  the width of the pictures, in pixels
          * @param height the height of the pictures, in pixels
          * @see #setDisplayOrientation(int)
@@ -3371,6 +3381,16 @@ public class Camera {
          * camera is used as the video source. In this case, the size of the
          * preview can be different from the resolution of the recorded video
          * during video recording.</p>
+         *
+         * <p>Exception on 176x144 (QCIF) resolution:
+         * Camera devices usually have a fixed capability for downscaling from
+         * larger resolution to smaller, and the QCIF resolution sometimes
+         * is not fully supported due to this limitation on devices with
+         * high-resolution image sensors. Therefore, trying to configure a QCIF
+         * video resolution with any preview or picture size larger than
+         * 1920x1080  (either width or height) might not be supported, and
+         * {@link #setParameters(Camera.Parameters)} will throw a
+         * RuntimeException if it is not.</p>
          *
          * @return a list of Size object if camera has separate preview and
          *         video output; otherwise, null is returned.
@@ -3665,6 +3685,16 @@ public class Camera {
          *
          * <p>Applications need to consider the display orientation. See {@link
          * #setPreviewSize(int,int)} for reference.</p>
+         *
+         * <p>Exception on 176x144 (QCIF) resolution:
+         * Camera devices usually have a fixed capability for downscaling from
+         * larger resolution to smaller, and the QCIF resolution sometimes
+         * is not fully supported due to this limitation on devices with
+         * high-resolution image sensors. Therefore, trying to configure a QCIF
+         * picture size with any preview or video size larger than 1920x1080
+         * (either width or height) might not be supported, and
+         * {@link #setParameters(Camera.Parameters)} might throw a
+         * RuntimeException if it is not.</p>
          *
          * @param width  the width for pictures, in pixels
          * @param height the height for pictures, in pixels
@@ -4797,7 +4827,6 @@ public class Camera {
             splitter.setString(str);
             int index = 0;
             for (String s : splitter) {
-                s = s.replaceAll("\\s","");
                 output[index++] = Integer.parseInt(s);
             }
         }
